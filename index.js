@@ -1,11 +1,12 @@
-const {
+import {
     AckPolicy,
     DeliverPolicy,
     DiscardPolicy,
     ReplayPolicy,
     RetentionPolicy,
+    StringCodec,
     connect,
-} = require("nats");
+} from "nats";
 
 (async () => {
     const connection = await connect({
@@ -13,10 +14,8 @@ const {
         reconnect: true,
         reconnectTimeWait: 5_000,
         maxReconnectAttempts: 100,
-        verbose: true, //NODE_ENV === 'development' || NODE_ENV === 'test',
         timeout: 30_000,
         waitOnFirstConnect: true,
-        pedantic: true,
     });
     console.log(`connected to ${connection.getServer()}`);
 
@@ -37,8 +36,6 @@ const {
         name: streamName,
         subjects: [subjectName],
         retention: RetentionPolicy.Workqueue,
-        no_ack: false,
-        num_replicas: 1,
         discard: DiscardPolicy.Old,
         max_bytes: 10e9, // 10GB in bytes
         max_age: 0, // infinite
@@ -50,6 +47,7 @@ const {
     const queueConsumerInfo = await jetstreamManager.consumers.add(
         streamInfo.config.name,
         {
+            durable_name: "queue_consumer",
             filter_subject: subjectName,
             inactive_threshold: 5e9, // 5s in nanoseconds
             ack_wait: 2e9, // 2s in nanoseconds
@@ -82,10 +80,10 @@ const {
     const jetstreamClient = connection.jetstream();
     console.log(`connected to jetstream client`);
 
-    const pullSubscription = await jetstreamClient.pullSubscribe(
-        subjectName,
-        queueConsumerInfo
-    );
+    const pullSubscription = await jetstreamClient.pullSubscribe(subjectName, {
+        isBind: true,
+        ...queueConsumerInfo,
+    });
     console.log(
         `created pull subscription for consumer: ${JSON.stringify(
             await pullSubscription.consumerInfo(),
@@ -93,4 +91,25 @@ const {
             2
         )}`
     );
+
+    const { encode, decode } = StringCodec();
+    connection.publish(subjectName, encode("1"));
+    connection.publish(subjectName, encode("2"));
+    connection.publish(subjectName, encode("3"));
+
+    (async () => {
+        for await (const msg of pullSubscription) {
+            console.log(`received message: ${decode(msg.data)}`);
+            msg.ack();
+            requestNextMsg(pullSubscription);
+        }
+    })();
+
+    requestNextMsg(pullSubscription);
 })();
+
+function requestNextMsg(pullSubscription) {
+    pullSubscription.pull({
+        batch: 1,
+    });
+}
